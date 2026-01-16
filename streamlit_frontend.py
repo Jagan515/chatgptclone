@@ -1,34 +1,59 @@
 import streamlit as st
 from langgraph_backend import chatbot
 from langchain_core.messages import HumanMessage
+import time
 
-# st.session_state -> dict ->  so that upon reload the history does not get reload 
-CONFIG = {'configurable': {'thread_id': 'thread-1'}}
+CONFIG = {"configurable": {"thread_id": "thread-1"}}
 
-if 'message_history' not in st.session_state:
-    st.session_state['message_history'] = []
+# Initialize session state
+if "message_history" not in st.session_state:
+    st.session_state["message_history"] = []
 
-# loading the conversation history
-for message in st.session_state['message_history']:
-    with st.chat_message(message['role']):
-        st.text(message['content'])
+# Load conversation history (use markdown!)
+for message in st.session_state["message_history"]:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-#{'role': 'user', 'content': 'Hi'}
-#{'role': 'assistant', 'content': 'Hi=ello'}
-
-user_input = st.chat_input('Type here')
+user_input = st.chat_input("Type here")
 
 if user_input:
+    # Save & render user message
+    st.session_state["message_history"].append(
+        {"role": "user", "content": user_input}
+    )
+    with st.chat_message("user"):
+        st.markdown(user_input)
 
-    # first add the message to message_history
-    st.session_state['message_history'].append({'role': 'user', 'content': user_input})
-    with st.chat_message('user'):
-        st.text(user_input)
+    # Stream assistant response
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        full_response = ""
+        buffer = ""
 
-    response = chatbot.invoke({'messages': [HumanMessage(content=user_input)]}, config=CONFIG)
-    
-    ai_message = response['messages'][-1].content
-    # first add the message to message_history
-    st.session_state['message_history'].append({'role': 'assistant', 'content': ai_message})
-    with st.chat_message('assistant'):
-        st.text(ai_message)
+        for message_chunk, metadata in chatbot.stream(
+            {"messages": [HumanMessage(content=user_input)]},
+            config=CONFIG,
+            stream_mode="messages",
+        ):
+            if not message_chunk.content:
+                continue
+
+            buffer += message_chunk.content
+
+            # Render only when safe (markdown stability)
+            if buffer.endswith(("\n", " ", ".", "!", "?")):
+                full_response += buffer
+                buffer = ""
+
+                placeholder.markdown(full_response)
+                time.sleep(0.015)  # ChatGPT-like speed
+
+        # Flush remaining buffer
+        if buffer:
+            full_response += buffer
+            placeholder.markdown(full_response)
+
+    # Save assistant message AFTER streaming completes
+    st.session_state["message_history"].append(
+        {"role": "assistant", "content": full_response}
+    )
