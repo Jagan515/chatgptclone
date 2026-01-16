@@ -1,59 +1,149 @@
 import streamlit as st
 from langgraph_backend import chatbot
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
+import uuid
 import time
 
-CONFIG = {"configurable": {"thread_id": "thread-1"}}
+#****  Utility Functions     *****
 
-# Initialize session state
+def generate_thread_id():
+    return str(uuid.uuid4())
+
+def generate_chat_title(text: str, max_len: int = 40) -> str:
+    text = text.strip().replace("\n", " ")
+    return text[:max_len] + ("..." if len(text) > max_len else "")
+
+def add_thread(thread_id, title):
+    st.session_state["chat_threads"][thread_id] = title
+
+def load_conversation(thread_id):
+    state = chatbot.get_state(
+        config={"configurable": {"thread_id": thread_id}}
+    )
+    return state.values.get("messages", [])
+
+# *********** Session Setup *****************
+
 if "message_history" not in st.session_state:
     st.session_state["message_history"] = []
 
-# Load conversation history (use markdown!)
+if "thread_id" not in st.session_state:
+    st.session_state["thread_id"] = None  # created lazily
+
+if "chat_threads" not in st.session_state:
+    st.session_state["chat_threads"] = {}  # {thread_id: title}
+
+if "pending_new_chat" not in st.session_state:
+    st.session_state["pending_new_chat"] = False
+
+# **************** Sidebar UI **********************
+st.sidebar.title("LangGraph Chatbot")
+
+# 🔥 New Chat (NO thread created yet)
+if st.sidebar.button("➕ New Chat"):
+    st.session_state["pending_new_chat"] = True
+    st.session_state["message_history"] = []
+
+st.sidebar.header("My Conversations")
+
+for thread_id, title in reversed(
+    list(st.session_state["chat_threads"].items())
+):
+    if st.sidebar.button(
+        title,
+        key=f"thread_{thread_id}"
+    ):
+        st.session_state["thread_id"] = thread_id
+        st.session_state["pending_new_chat"] = False
+
+        messages = load_conversation(thread_id)
+        history = []
+
+        for msg in messages:
+            role = "user" if isinstance(msg, HumanMessage) else "assistant"
+            history.append({"role": role, "content": msg.content})
+
+        st.session_state["message_history"] = history
+
+# ************************ Main UI ***********************
+
+# Render conversation history
 for message in st.session_state["message_history"]:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-user_input = st.chat_input("Type here")
+user_input = st.chat_input("Type here...")
+
+# *********************** Streaming Logic ***********************
 
 if user_input:
+    # 🔑 Create thread ONLY on first message
+    if st.session_state["pending_new_chat"] or st.session_state["thread_id"] is None:
+        st.session_state["thread_id"] = generate_thread_id()
+        st.session_state["pending_new_chat"] = False
+
+    CONFIG = {"configurable": {"thread_id": st.session_state["thread_id"]}}
+
     # Save & render user message
     st.session_state["message_history"].append(
         {"role": "user", "content": user_input}
     )
+
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Stream assistant response
+    # ******************* Assistant Streaming *********************
+
     with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
         buffer = ""
+        cursor_visible = True
 
-        for message_chunk, metadata in chatbot.stream(
-            {"messages": [HumanMessage(content=user_input)]},
-            config=CONFIG,
-            stream_mode="messages",
-        ):
-            if not message_chunk.content:
-                continue
+        with st.status("Thinking…", state="running") as status:
+            status.write("Understanding your question…")
+            time.sleep(0.3)
 
-            buffer += message_chunk.content
+            status.write("Generating response…")
+            time.sleep(0.3)
 
-            # Render only when safe (markdown stability)
-            if buffer.endswith(("\n", " ", ".", "!", "?")):
+            for message_chunk, _ in chatbot.stream(
+                {"messages": [HumanMessage(content=user_input)]},
+                config=CONFIG,
+                stream_mode="messages",
+            ):
+                if not isinstance(message_chunk, AIMessage):
+                    continue
+
+                if not message_chunk.content:
+                    continue
+
+                buffer += message_chunk.content
+
+                # Safe markdown rendering
+                if buffer.endswith(("\n", " ", ".", "!", "?", "`")):
+                    full_response += buffer
+                    buffer = ""
+
+                    cursor = "▍" if cursor_visible else ""
+                    placeholder.markdown(full_response + cursor)
+                    cursor_visible = not cursor_visible
+
+                    time.sleep(0.015)  # ChatGPT-like speed
+
+            # Flush remaining buffer
+            if buffer:
                 full_response += buffer
-                buffer = ""
-
                 placeholder.markdown(full_response)
-                time.sleep(0.015)  # ChatGPT-like speed
 
-        # Flush remaining buffer
-        if buffer:
-            full_response += buffer
-            placeholder.markdown(full_response)
+            status.update(label="Response ready", state="complete")
 
-    # Save assistant message AFTER streaming completes
+    # Save assistant message
     st.session_state["message_history"].append(
         {"role": "assistant", "content": full_response}
     )
+
+    #  Generate title from ASSISTANT RESPONSE (ONLY ONCE)
+    if st.session_state["thread_id"] not in st.session_state["chat_threads"]:
+        title = generate_chat_title(full_response)
+        add_thread(st.session_state["thread_id"], title)
